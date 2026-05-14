@@ -163,6 +163,17 @@ const responseBody = await manager.getResponseById('entry-id', 'my-app:cache:')
 
 ```typescript
 interface RedisCacheStoreOpts {
+  // Use "cluster" for Valkey/Redis Cluster shards, or "auto" to use
+  // Cluster when multiple startupNodes are supplied
+  mode?: "standalone" | "cluster" | "auto"
+
+  // Valkey/Redis Cluster startup nodes and iovalkey cluster options
+  startupNodes?: ClusterNode[]
+  clusterOptions?: ClusterOptions
+
+  // Prefix applied by this library. Prefer this over clientOpts.keyPrefix.
+  keyPrefix?: string
+
   // Redis client options (passed to iovalkey)
   clientOpts?: {
     host?: string
@@ -377,12 +388,66 @@ graph TB
 
 The library uses a structured approach to Redis keys:
 
-- **Metadata keys**: `{prefix}metadata:{origin}:{path}:{method}:{id}`
-- **Value keys**: `{prefix}values:{id}`
-- **ID keys**: `{prefix}ids:{id}`
-- **Tag keys**: `{prefix}cache-tags:{tag1}:{tag2}:{id}`
+- **Metadata keys**: `{prefix}metadata:{urlMethodHash}:{origin}:{path}:{method}:{id}`
+- **Value keys**: `{prefix}values:{urlMethodHash}:{id}`
+- **ID keys**: `{prefix}ids:{urlMethodHash}:{id}`
+- **Tag keys**: `{prefix}cache-tags:{urlMethodHash}:{tag1}:{tag2}:{id}`
+- **URL/method index keys**: `{prefix}cache:v2:{urlMethodHash}:index`
+- **URL method set keys**: `{prefix}cache:v2:{urlHash}:methods`
+- **Tag index keys**: `{prefix}cache:v2:tag:{tagHash}`
+- **Global tag index keys**: `cache:v2:global-tag:{tagHash}`
 
-Where `{prefix}` is your configured `keyPrefix` and `{id}` is a UUID for each cache entry.
+Where `{prefix}` is your configured `keyPrefix`. Braced `{urlMethodHash}` and `{tagHash}` portions are Valkey Cluster hash tags, so related entry keys are routed to the same shard. New entries use a deterministic ID derived from URL/method and Vary signature unless an explicit `key.id` is supplied.
+
+Normal cache lookup uses the v2 URL/method index and does not call `SCAN`, `KEYS`, broad pattern matching, or full database iteration. The index stores one field per Vary signature, so lookup cost depends on the number of variants for that URL/method rather than total Valkey key count. Expired or dead index references are cleaned lazily during lookup.
+
+Vary header names are normalized to lower case, request header matching is case-insensitive, and `Vary: *` responses are not written to the cache. When several variants match, the store keeps the previous behavior and returns the most specific variant.
+
+Tag invalidation is maintained at write time through tag indexes. `deleteTags()` reads direct tag index members and deletes affected entries without scanning the keyspace. The legacy tag keys remain for `RedisCacheManager` compatibility.
+
+See [docs/indexed-lookup-architecture.md](docs/indexed-lookup-architecture.md) for the SCAN bottleneck analysis, v2 index schema, Vary signature details, stale cleanup behavior, shard notes, and migration tradeoffs.
+
+### Cluster and Externally Supplied Clients
+
+The constructor remains backward compatible and also accepts additive client options:
+
+```javascript
+import { Cluster, Redis } from 'iovalkey'
+import { RedisCacheStore } from 'undici-cache-redis'
+
+const standaloneClient = new Redis({ host: 'localhost', port: 6379 })
+const standaloneStore = new RedisCacheStore({
+  client: standaloneClient,
+  clientOpts: { keyPrefix: 'my-app:' }
+})
+
+const clusterStore = new RedisCacheStore({
+  mode: 'cluster',
+  startupNodes: [{ host: '127.0.0.1', port: 7000 }],
+  clusterOptions: {
+    scaleReads: 'master'
+  },
+  keyPrefix: 'my-app:'
+})
+
+const externalCluster = new Cluster([{ host: '127.0.0.1', port: 7000 }])
+const externalClusterStore = new RedisCacheStore({
+  client: externalCluster,
+  mode: 'cluster'
+})
+```
+
+When a client is supplied externally, `close()` does not quit that client. Cluster client-side tracking is disabled because Redis/Valkey client-side tracking invalidation subscriptions are node-specific. In cluster mode the short local miss cache is also disabled by default so one pod does not keep returning a recent miss after another pod writes the entry.
+
+For sharded Valkey/Redis Cluster deployments, normal lookup reads the URL/method index on the shard selected by `{urlMethodHash}`. Entry metadata, ID, value, and compatibility tag keys are written with the same hash tag, while tag indexes use tag-derived hash tags and fan out only when invalidation spans multiple URL/method groups.
+
+### Migration Notes
+
+The indexed lookup path intentionally does not scan for legacy-only entries. For existing deployments, either flush cache data during upgrade or run explicit maintenance/migration tooling. SCAN remains available in `RedisCacheManager` and test/maintenance helpers, but not in normal `get()` handling.
+
+### Current Observability Status
+
+OpenTelemetry metrics are planned but not implemented in this slice. Until that lands, avoid relying on metric names or metric attributes described in design discussions as stable API.
 
 ## Cache Invalidation Flow
 

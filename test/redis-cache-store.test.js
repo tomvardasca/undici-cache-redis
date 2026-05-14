@@ -5,6 +5,7 @@ const { describe, test } = require('node:test')
 const { strictEqual, deepStrictEqual, notEqual, equal, fail, ok } = require('node:assert')
 const { Readable } = require('node:stream')
 const { once } = require('node:events')
+const { Redis } = require('iovalkey')
 const { RedisCacheStore } = require('../lib/redis-cache-store')
 const { getAllKeys, cleanValkey } = require('./helper.js')
 const { setTimeout: sleep } = require('node:timers/promises')
@@ -458,6 +459,389 @@ function cacheStoreTests (CacheStore) {
     await once(writeStream, 'close')
   })
 
+  test('does not use SCAN or KEYS during normal lookup', async (t) => {
+    await cleanValkey()
+
+    const keyPrefix = `${crypto.randomUUID()}:`
+    const redis = new Redis()
+    const forbiddenCommands = []
+
+    redis.scan = async () => {
+      forbiddenCommands.push('scan')
+      throw new Error('SCAN must not be used during lookup')
+    }
+    redis.keys = async () => {
+      forbiddenCommands.push('keys')
+      throw new Error('KEYS must not be used during lookup')
+    }
+
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {
+        accept: 'application/json'
+      }
+    }
+    const requestValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {},
+      vary: {
+        accept: 'application/json'
+      },
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 10000,
+      deleteAt: Date.now() + 20000
+    }
+
+    const store = new CacheStore({
+      client: redis,
+      clientOpts: { keyPrefix },
+      tracking: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    t.after(async () => {
+      await store.close()
+      await redis.quit()
+    })
+
+    const writeStream = store.createWriteStream(request, requestValue)
+    writeResponse(writeStream, ['indexed'])
+    await once(writeStream, 'close')
+
+    const readStream = await store.get(structuredClone(request))
+    notEqual(readStream, undefined)
+    deepStrictEqual(await readResponse(readStream), {
+      ...requestValue,
+      body: ['indexed']
+    })
+    deepStrictEqual(forbiddenCommands, [])
+  })
+
+  test('uses optimized lookup field for matching vary headers', async (t) => {
+    await cleanValkey()
+
+    const keyPrefix = `${crypto.randomUUID()}:`
+    const redis = new Redis()
+    t.after(async () => {
+      await store.close()
+      await redis.quit()
+    })
+
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {
+        accept: 'application/json'
+      }
+    }
+    const requestValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {},
+      vary: {
+        accept: 'application/json'
+      },
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 10000,
+      deleteAt: Date.now() + 20000
+    }
+    const store = new CacheStore({
+      clientOpts: { keyPrefix },
+      tracking: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    const writeStream = store.createWriteStream(request, requestValue)
+    writeResponse(writeStream, ['indexed'])
+    await once(writeStream, 'close')
+
+    const keys = await getAllKeys()
+    const indexKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:`) && key.endsWith(':index'))
+    ok(indexKey)
+
+    const indexFields = await redis.hkeys(indexKey)
+    ok(indexFields.some(field => field.startsWith('$lookup:') && field !== '$lookup:no-headers'))
+
+    const readStream = await store.get(structuredClone(request))
+    notEqual(readStream, undefined)
+    deepStrictEqual(await readResponse(readStream), {
+      ...requestValue,
+      body: ['indexed']
+    })
+  })
+
+  test('co-locates entry keys with the URL/method index for cluster slots', async (t) => {
+    await cleanValkey()
+
+    const keyPrefix = `${crypto.randomUUID()}:`
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {}
+    }
+    const requestValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {
+        'cache-tag': 'cluster'
+      },
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 10000,
+      deleteAt: Date.now() + 20000
+    }
+
+    const store = new CacheStore({
+      clientOpts: { keyPrefix },
+      cacheTagsHeader: 'cache-tag',
+      tracking: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    t.after(async () => {
+      await store.close()
+    })
+
+    const writeStream = store.createWriteStream(request, requestValue)
+    writeResponse(writeStream, ['cluster-ready'])
+    await once(writeStream, 'close')
+
+    const keys = await getAllKeys()
+    const indexKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:`) && key.endsWith(':index'))
+    ok(indexKey)
+
+    const hashTag = indexKey.match(/\{([^}]+)\}/)?.[1]
+    ok(hashTag)
+
+    ok(keys.some(key => key.startsWith(`${keyPrefix}metadata:{${hashTag}}:`)))
+    ok(keys.some(key => key.startsWith(`${keyPrefix}ids:{${hashTag}}:`)))
+    ok(keys.some(key => key.startsWith(`${keyPrefix}values:{${hashTag}}:`)))
+    ok(keys.some(key => key.startsWith(`${keyPrefix}cache-tags:{${hashTag}}:`)))
+  })
+
+  test('accepts top-level keyPrefix without passing it to the client', async (t) => {
+    await cleanValkey()
+
+    const keyPrefix = `${crypto.randomUUID()}:`
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {}
+    }
+    const requestValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {},
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 10000,
+      deleteAt: Date.now() + 20000
+    }
+
+    const store = new CacheStore({
+      keyPrefix,
+      tracking: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    t.after(async () => {
+      await store.close()
+    })
+
+    const writeStream = store.createWriteStream(request, requestValue)
+    writeResponse(writeStream, ['prefixed'])
+    await once(writeStream, 'close')
+
+    const keys = await getAllKeys()
+    ok(keys.every(key => key.startsWith(keyPrefix) || key.startsWith('cache:v2:global-tag:')))
+
+    const readStream = await store.get(structuredClone(request))
+    notEqual(readStream, undefined)
+    deepStrictEqual(await readResponse(readStream), {
+      ...requestValue,
+      body: ['prefixed']
+    })
+  })
+
+  test('caches repeated optimized misses until a local write clears the miss', async (t) => {
+    await cleanValkey()
+
+    const redis = new Redis()
+    let lookupReads = 0
+    const originalHget = redis.hget.bind(redis)
+    redis.hget = async (key, field) => {
+      if (key.includes('cache:v2:') && String(field).startsWith('$lookup:')) {
+        lookupReads++
+      }
+      return originalHget(key, field)
+    }
+
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {}
+    }
+    const requestValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {},
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 10000,
+      deleteAt: Date.now() + 20000
+    }
+    const store = new CacheStore({
+      client: redis,
+      tracking: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    t.after(async () => {
+      await store.close()
+      await redis.quit()
+    })
+
+    strictEqual(await store.get(request), undefined)
+    strictEqual(await store.get(request), undefined)
+    strictEqual(lookupReads, 1)
+
+    const writeStream = store.createWriteStream(request, requestValue)
+    writeResponse(writeStream, ['indexed'])
+    await once(writeStream, 'close')
+
+    const readStream = await store.get(request)
+    notEqual(readStream, undefined)
+    strictEqual(lookupReads, 2)
+  })
+
+  test('uses hash field expiration for indexed entries when supported', async (t) => {
+    await cleanValkey()
+
+    const redis = new Redis()
+    t.after(async () => {
+      await redis.quit()
+    })
+
+    if (!await supportsHashFieldExpiration(redis)) {
+      t.skip('HEXPIREAT is not supported by this Redis/Valkey server')
+      return
+    }
+
+    const keyPrefix = `${crypto.randomUUID()}:`
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {}
+    }
+    const requestValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {},
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 10000,
+      deleteAt: Date.now() + 20000
+    }
+
+    const store = new CacheStore({
+      clientOpts: { keyPrefix },
+      tracking: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    t.after(async () => {
+      await store.close()
+    })
+
+    const writeStream = store.createWriteStream(request, requestValue)
+    writeResponse(writeStream, ['indexed'])
+    await once(writeStream, 'close')
+
+    const keys = await getAllKeys()
+    const indexKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:`) && key.endsWith(':index'))
+    ok(indexKey)
+
+    const indexFields = await redis.hkeys(indexKey)
+    ok(indexFields.includes('no-vary'))
+
+    const [ttl] = await redis.call('HTTL', indexKey, 'FIELDS', 1, 'no-vary')
+    ok(ttl > 0)
+    ok(ttl <= 20)
+  })
+
+  test('can disable hash field expiration optimization', async (t) => {
+    await cleanValkey()
+
+    const redis = new Redis()
+    t.after(async () => {
+      await redis.quit()
+    })
+
+    if (!await supportsHashFieldExpiration(redis)) {
+      t.skip('HEXPIREAT is not supported by this Redis/Valkey server')
+      return
+    }
+
+    const keyPrefix = `${crypto.randomUUID()}:`
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {}
+    }
+    const requestValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {},
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 10000,
+      deleteAt: Date.now() + 20000
+    }
+
+    const store = new CacheStore({
+      clientOpts: { keyPrefix },
+      tracking: false,
+      enableValkey9Optimizations: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    t.after(async () => {
+      await store.close()
+    })
+
+    const writeStream = store.createWriteStream(request, requestValue)
+    writeResponse(writeStream, ['indexed'])
+    await once(writeStream, 'close')
+
+    const keys = await getAllKeys()
+    const indexKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:`) && key.endsWith(':index'))
+    ok(indexKey)
+
+    const indexFields = await redis.hkeys(indexKey)
+    ok(indexFields.includes('no-vary'))
+
+    const [ttl] = await redis.call('HTTL', indexKey, 'FIELDS', 1, 'no-vary')
+    strictEqual(ttl, -1)
+  })
+
   test('invalidates cache by cache keys', async (t) => {
     await cleanValkey()
 
@@ -498,7 +882,7 @@ function cacheStoreTests (CacheStore) {
 
     {
       const keys = await getAllKeys()
-      strictEqual(keys.length, 3)
+      strictEqual(keys.length, 5)
     }
 
     await store.deleteKeys([
@@ -507,7 +891,7 @@ function cacheStoreTests (CacheStore) {
 
     {
       const keys = await getAllKeys()
-      strictEqual(keys.length, 0)
+      strictEqual(countEntryKeys(keys), 0)
     }
   })
 
@@ -551,7 +935,7 @@ function cacheStoreTests (CacheStore) {
 
     {
       const keys = await getAllKeys()
-      strictEqual(keys.length, 3)
+      strictEqual(keys.length, 5)
     }
 
     await store.deleteKeys([
@@ -560,7 +944,7 @@ function cacheStoreTests (CacheStore) {
 
     {
       const keys = await getAllKeys()
-      strictEqual(keys.length, 0)
+      strictEqual(countEntryKeys(keys), 0)
     }
   })
 
@@ -667,14 +1051,14 @@ function cacheStoreTests (CacheStore) {
 
     {
       const keys = await getAllKeys()
-      strictEqual(keys.length, 12)
+      strictEqual(countEntryKeys(keys), 12)
     }
 
     await store.deleteTags([['tag1', 'tag2']])
 
     {
       const keys = await getAllKeys()
-      strictEqual(keys.length, 4)
+      strictEqual(countEntryKeys(keys), 4)
 
       const tagsKeys = keys.filter(key => key.includes('cache-tags'))
       strictEqual(tagsKeys.length, 1)
@@ -786,14 +1170,14 @@ function cacheStoreTests (CacheStore) {
 
     {
       const keys = await getAllKeys()
-      strictEqual(keys.length, 12)
+      strictEqual(countEntryKeys(keys), 12)
     }
 
     await store.deleteTags(['tag1', 'tag4'])
 
     {
       const keys = await getAllKeys()
-      strictEqual(keys.length, 0)
+      strictEqual(countEntryKeys(keys), 0)
     }
   })
 
@@ -856,6 +1240,20 @@ function writeResponse (stream, body = []) {
   }
 
   stream.end()
+}
+
+function countEntryKeys (keys) {
+  return keys.filter(key =>
+    key.includes('metadata:') ||
+    key.includes('values:') ||
+    key.includes('ids:') ||
+    key.includes('cache-tags:')
+  ).length
+}
+
+async function supportsHashFieldExpiration (redis) {
+  const commandInfo = await redis.call('COMMAND', 'INFO', 'HEXPIREAT')
+  return Array.isArray(commandInfo) && commandInfo[0] !== null
 }
 
 /**

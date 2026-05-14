@@ -141,6 +141,44 @@ test('should respect vary directives', async (t) => {
   })
 })
 
+test('should return the most specific matching vary entry', async () => {
+  const cache = new TrackingCache()
+
+  const entry1 = generateCacheEntry({
+    id: 'entry1',
+    origin: 'http://test.com',
+    body: 'specific'
+  })
+  cache.set(entry1.key, {
+    vary: {
+      'test-header-1': 'foo',
+      'test-header-2': 'foo',
+      'test-header-3': 'foo'
+    }
+  }, entry1.value)
+
+  const entry2 = generateCacheEntry({
+    id: 'entry2',
+    origin: 'http://test.com',
+    body: 'generic'
+  })
+  cache.set(entry2.key, {
+    vary: {
+      'test-header-1': 'foo',
+      'test-header-2': 'foo'
+    }
+  }, entry2.value)
+
+  deepStrictEqual(cache.get({
+    ...entry1.key,
+    headers: {
+      'Test-Header-1': 'foo',
+      'Test-Header-2': 'foo',
+      'Test-Header-3': 'foo'
+    }
+  }), entry1.value)
+})
+
 function generateCacheEntry ({ id, origin, body, metadata }) {
   id = id ?? Math.random().toString(36).slice(2)
   origin = origin ?? 'http://test.com'

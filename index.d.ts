@@ -1,9 +1,45 @@
 import { EventEmitter, Writable } from "node:stream";
-import { RedisOptions } from "iovalkey";
+import { Cluster, ClusterNode, ClusterOptions, Redis, RedisOptions } from "iovalkey";
 import { GetResult, CacheKey, CachedResponse } from "./lib/internal-types";
 
 export interface RedisCacheStoreOpts {
   clientConfigTracking?: boolean
+
+  client?: Redis | Cluster
+
+  mode?: "standalone" | "cluster" | "auto"
+
+  startupNodes?: ClusterNode[]
+
+  clusterOptions?: ClusterOptions
+
+  keyPrefix?: string
+
+  shardMode?: "valkey-cluster"
+
+  hashTagStrategy?: "url-method"
+
+  indexStorage?: "separate-keys" | "url-hash" | "hybrid" | "auto"
+
+  maxShardPipelineSize?: number
+
+  shardFanoutConcurrency?: number
+
+  enableValkey9Optimizations?: boolean
+
+  missCacheTtl?: number
+
+  missCacheMaxCount?: number
+
+  enableLegacyCompatibility?: boolean
+
+  enableMigrationScan?: boolean
+
+  metrics?: boolean
+
+  meter?: unknown
+
+  meterProvider?: unknown
 
   clientOpts?: RedisOptions
   
