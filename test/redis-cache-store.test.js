@@ -6,7 +6,7 @@ const { strictEqual, deepStrictEqual, notEqual, equal, fail, ok } = require('nod
 const { Readable } = require('node:stream')
 const { once } = require('node:events')
 const { Redis } = require('iovalkey')
-const { RedisCacheStore } = require('../lib/redis-cache-store')
+const { RedisCacheStore, _normalizeClusterStartupNodes: normalizeClusterStartupNodes } = require('../lib/redis-cache-store')
 const { getAllKeys, cleanValkey } = require('./helper.js')
 const { setTimeout: sleep } = require('node:timers/promises')
 
@@ -24,6 +24,38 @@ function cacheStoreTests (CacheStore) {
       equal(typeof store.get, 'function')
       equal(typeof store.createWriteStream, 'function')
       equal(typeof store.delete, 'function')
+    })
+
+    test('accepts a single cluster URL for sharded Valkey discovery', () => {
+      deepStrictEqual(
+        normalizeClusterStartupNodes({
+          clusterUrl: 'clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com:6379'
+        }),
+        ['clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com:6379']
+      )
+
+      deepStrictEqual(
+        normalizeClusterStartupNodes({
+          clusterUrl: 'rediss://clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com:6379'
+        }),
+        ['rediss://clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com:6379']
+      )
+    })
+
+    test('accepts a single startup node for cluster discovery', () => {
+      deepStrictEqual(
+        normalizeClusterStartupNodes({
+          startupNodes: { host: 'clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com', port: 6379 }
+        }),
+        [{ host: 'clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com', port: 6379 }]
+      )
+
+      deepStrictEqual(
+        normalizeClusterStartupNodes({
+          startupNodes: 'clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com:6379'
+        }),
+        ['clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com:6379']
+      )
     })
 
     // Checks that it can store & fetch different responses
@@ -728,7 +760,7 @@ function cacheStoreTests (CacheStore) {
     strictEqual(lookupReads, 2)
   })
 
-  test('uses hash field expiration for indexed entries when supported', async (t) => {
+  test('automatically expires indexed fields when hash field expiration is supported', async (t) => {
     await cleanValkey()
 
     const redis = new Redis()
@@ -754,7 +786,7 @@ function cacheStoreTests (CacheStore) {
       headers: {},
       cachedAt: Date.now(),
       staleAt: Date.now() + 10000,
-      deleteAt: Date.now() + 20000
+      deleteAt: Date.now() + 2500
     }
 
     const store = new CacheStore({
@@ -782,7 +814,11 @@ function cacheStoreTests (CacheStore) {
 
     const [ttl] = await redis.call('HTTL', indexKey, 'FIELDS', 1, 'no-vary')
     ok(ttl > 0)
-    ok(ttl <= 20)
+    ok(ttl <= 3)
+
+    await sleep(3500)
+
+    strictEqual(await redis.hexists(indexKey, 'no-vary'), 0)
   })
 
   test('can disable hash field expiration optimization', async (t) => {

@@ -167,8 +167,12 @@ interface RedisCacheStoreOpts {
   // Cluster when multiple startupNodes are supplied
   mode?: "standalone" | "cluster" | "auto"
 
+  // Valkey/Redis Cluster endpoint. Can be an AWS ElastiCache
+  // configuration endpoint host or redis:// / rediss:// URL.
+  clusterUrl?: string
+
   // Valkey/Redis Cluster startup nodes and iovalkey cluster options
-  startupNodes?: ClusterNode[]
+  startupNodes?: ClusterNode | ClusterNode[]
   clusterOptions?: ClusterOptions
 
   // Prefix applied by this library. Prefer this over clientOpts.keyPrefix.
@@ -423,7 +427,7 @@ const standaloneStore = new RedisCacheStore({
 
 const clusterStore = new RedisCacheStore({
   mode: 'cluster',
-  startupNodes: [{ host: '127.0.0.1', port: 7000 }],
+  clusterUrl: 'clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com:6379',
   clusterOptions: {
     scaleReads: 'master'
   },
@@ -440,6 +444,20 @@ const externalClusterStore = new RedisCacheStore({
 When a client is supplied externally, `close()` does not quit that client. Cluster client-side tracking is disabled because Redis/Valkey client-side tracking invalidation subscriptions are node-specific. In cluster mode the short local miss cache is also disabled by default so one pod does not keep returning a recent miss after another pod writes the entry.
 
 For sharded Valkey/Redis Cluster deployments, normal lookup reads the URL/method index on the shard selected by `{urlMethodHash}`. Entry metadata, ID, value, and compatibility tag keys are written with the same hash tag, while tag indexes use tag-derived hash tags and fan out only when invalidation spans multiple URL/method groups.
+
+For AWS ElastiCache cluster mode enabled, pass the configuration endpoint as `clusterUrl`; iovalkey discovers the shard topology from that single node. Use a `rediss://` URL or `clientOpts.tls` when in-transit encryption is enabled:
+
+```javascript
+const store = new RedisCacheStore({
+  clusterUrl: 'rediss://clustercfg.my-cache.xxxxxx.use1.cache.amazonaws.com:6379',
+  keyPrefix: 'my-service:cache:',
+  clientOpts: {
+    username: 'default',
+    password: process.env.ELASTICACHE_AUTH_TOKEN,
+    tls: {}
+  }
+})
+```
 
 ### Migration Notes
 

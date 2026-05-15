@@ -9,7 +9,13 @@ export interface RedisCacheStoreOpts {
 
   mode?: "standalone" | "cluster" | "auto"
 
-  startupNodes?: ClusterNode[]
+  /**
+   * Single Valkey/Redis Cluster endpoint. This can be an AWS ElastiCache
+   * configuration endpoint host or a redis:// / rediss:// URL.
+   */
+  clusterUrl?: string
+
+  startupNodes?: ClusterNode | ClusterNode[]
 
   clusterOptions?: ClusterOptions
 
