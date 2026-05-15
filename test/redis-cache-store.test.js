@@ -58,6 +58,56 @@ function cacheStoreTests (CacheStore) {
       )
     })
 
+    test('write stream closes when redis write fails', async () => {
+      const redisError = new Error('redis write failed')
+      const reportedErrors = []
+      const fakeRedis = {
+        hget: async () => null,
+        call: async () => null,
+        hmset: async () => { throw redisError }
+      }
+
+      const store = new CacheStore({
+        client: fakeRedis,
+        mode: 'cluster',
+        tracking: false,
+        errorCallback: err => {
+          reportedErrors.push(err)
+        }
+      })
+
+      const writeStream = store.createWriteStream({
+        origin: 'localhost',
+        path: '/',
+        method: 'GET',
+        headers: {}
+      }, {
+        statusCode: 200,
+        statusMessage: '',
+        headers: {},
+        cacheControlDirectives: {},
+        cachedAt: Date.now(),
+        staleAt: Date.now() + 10000,
+        deleteAt: Date.now() + 20000
+      })
+
+      const errorPromise = new Promise(resolve => {
+        writeStream.once('error', resolve)
+      })
+      const closePromise = new Promise(resolve => {
+        writeStream.once('close', resolve)
+      })
+
+      writeStream.end(Buffer.from('body'))
+
+      const streamError = await errorPromise
+      await closePromise
+
+      strictEqual(streamError, redisError)
+      deepStrictEqual(reportedErrors, [redisError])
+      strictEqual(writeStream.closed, true)
+    })
+
     // Checks that it can store & fetch different responses
     test('basic functionality', async (t) => {
       await cleanValkey()
