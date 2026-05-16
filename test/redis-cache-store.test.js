@@ -871,6 +871,79 @@ function cacheStoreTests (CacheStore) {
     strictEqual(await redis.hexists(indexKey, 'no-vary'), 0)
   })
 
+  test('bounds Valkey 9 optimized container keys with max entry TTLs', async (t) => {
+    await cleanValkey()
+
+    const redis = new Redis()
+    t.after(async () => {
+      await redis.quit()
+    })
+
+    if (!await supportsHashFieldExpiration(redis)) {
+      t.skip('HEXPIREAT is not supported by this Redis/Valkey server')
+      return
+    }
+
+    const keyPrefix = `${crypto.randomUUID()}:`
+    const tag = `tag-${crypto.randomUUID()}`
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {}
+    }
+    const requestValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {
+        'cache-tag': tag
+      },
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 1000,
+      deleteAt: Date.now() + 2500
+    }
+
+    const store = new CacheStore({
+      keyPrefix,
+      cacheTagsHeader: 'cache-tag',
+      tracking: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    t.after(async () => {
+      await store.close()
+    })
+
+    const writeStream = store.createWriteStream(request, requestValue)
+    writeResponse(writeStream, ['indexed'])
+    await once(writeStream, 'close')
+
+    const keys = await getAllKeys()
+    const indexKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:`) && key.endsWith(':index'))
+    const methodSetKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:`) && key.endsWith(':methods'))
+    const tagIndexKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:tag:`))
+    const globalTagIndexKey = keys.find(key => key.startsWith('cache:v2:global-tag:'))
+    ok(indexKey)
+    ok(methodSetKey)
+    ok(tagIndexKey)
+    ok(globalTagIndexKey)
+
+    for (const key of [indexKey, methodSetKey, tagIndexKey, globalTagIndexKey]) {
+      const ttl = await redis.ttl(key)
+      ok(ttl > 0)
+      ok(ttl <= 3)
+    }
+
+    await sleep(3500)
+
+    strictEqual(await redis.exists(indexKey), 0)
+    strictEqual(await redis.exists(methodSetKey), 0)
+    strictEqual(await redis.exists(tagIndexKey), 0)
+    strictEqual(await redis.exists(globalTagIndexKey), 0)
+  })
+
   test('can disable hash field expiration optimization', async (t) => {
     await cleanValkey()
 
