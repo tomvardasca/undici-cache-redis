@@ -188,6 +188,9 @@ interface RedisCacheStoreOpts {
   
   // Maximum size in bytes for a single cached response
   maxEntrySize?: number
+
+  // Allow explicitly cacheable 5xx responses to be stored (default: false)
+  cacheErrorResponses?: boolean
   
   // Maximum total cache size (for client-side cache)
   maxSize?: number
@@ -556,7 +559,7 @@ flowchart TD
 #### Methods
 
 - `get(key: CacheKey): Promise<GetResult | undefined>` - Retrieve cached response
-- `createWriteStream(key: CacheKey, value: CachedResponse): Writable` - Create write stream for caching
+- `createWriteStream(key: CacheKey, value: CachedResponse): Writable | undefined` - Create a write stream for cacheable responses
 - `delete(key: CacheKey): Promise<void>` - Delete cache entries by key pattern
 - `deleteKeys(keys: CacheKey[]): Promise<void>` - Delete multiple cache entries
 - `deleteTags(tags: string[]): Promise<void>` - Delete entries by cache tags

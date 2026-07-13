@@ -26,6 +26,60 @@ function cacheStoreTests (CacheStore) {
       equal(typeof store.delete, 'function')
     })
 
+    test('does not cache server error responses by default', async (t) => {
+      const store = new CacheStore({
+        client: {},
+        mode: 'cluster',
+        tracking: false
+      })
+      t.after(async () => store.close())
+
+      const writeStream = store.createWriteStream({
+        origin: 'http://test-origin',
+        path: '/',
+        method: 'GET',
+        headers: {}
+      }, {
+        statusCode: 502,
+        statusMessage: 'Bad Gateway',
+        headers: { 'cache-control': 'public, max-age=60' },
+        cacheControlDirectives: { public: true, 'max-age': 60 },
+        cachedAt: Date.now(),
+        staleAt: Date.now() + 60000,
+        deleteAt: Date.now() + 60000
+      })
+
+      strictEqual(writeStream, undefined)
+    })
+
+    test('can opt into caching server error responses', async (t) => {
+      const store = new CacheStore({
+        cacheErrorResponses: true,
+        client: {},
+        mode: 'cluster',
+        tracking: false
+      })
+      t.after(async () => store.close())
+
+      const writeStream = store.createWriteStream({
+        origin: 'http://test-origin',
+        path: '/',
+        method: 'GET',
+        headers: {}
+      }, {
+        statusCode: 502,
+        statusMessage: 'Bad Gateway',
+        headers: { 'cache-control': 'public, max-age=60' },
+        cacheControlDirectives: { public: true, 'max-age': 60 },
+        cachedAt: Date.now(),
+        staleAt: Date.now() + 60000,
+        deleteAt: Date.now() + 60000
+      })
+
+      ok(writeStream)
+      writeStream.destroy()
+    })
+
     test('accepts a single cluster URL for sharded Valkey discovery', () => {
       deepStrictEqual(
         normalizeClusterStartupNodes({
@@ -106,6 +160,63 @@ function cacheStoreTests (CacheStore) {
       strictEqual(streamError, redisError)
       deepStrictEqual(reportedErrors, [redisError])
       strictEqual(writeStream.closed, true)
+    })
+
+    test('pipelines each cluster container expiry update', async () => {
+      const pipelineBatches = []
+      const fakeRedis = {
+        hget: async () => null,
+        call: async (command) => command === 'COMMAND' ? [['hexpireat']] : 1,
+        hmset: async () => 1,
+        set: async () => 'OK',
+        sadd: async () => 1,
+        expireat: async () => 1,
+        hset: async () => 1,
+        pipeline: () => {
+          const calls = []
+          pipelineBatches.push(calls)
+          return {
+            call: (...args) => {
+              calls.push(args)
+            },
+            exec: async () => calls.map(() => [null, 1])
+          }
+        }
+      }
+
+      const store = new CacheStore({
+        client: fakeRedis,
+        mode: 'cluster',
+        tracking: false
+      })
+
+      const writeStream = store.createWriteStream({
+        origin: 'http://test-origin',
+        path: '/',
+        method: 'GET',
+        headers: {}
+      }, {
+        statusCode: 200,
+        statusMessage: 'OK',
+        headers: {},
+        cacheControlDirectives: {},
+        cachedAt: Date.now(),
+        staleAt: Date.now() + 10000,
+        deleteAt: Date.now() + 20000
+      })
+
+      writeStream.end(Buffer.from('body'))
+      await once(writeStream, 'close')
+
+      strictEqual(pipelineBatches.length, 2)
+      for (const calls of pipelineBatches) {
+        strictEqual(calls.length, 2)
+        strictEqual(calls[0][0], 'EXPIREAT')
+        strictEqual(calls[1][0], 'EXPIREAT')
+        strictEqual(calls[0][1], calls[1][1])
+        strictEqual(calls[0][3], 'NX')
+        strictEqual(calls[1][3], 'GT')
+      }
     })
 
     // Checks that it can store & fetch different responses
@@ -937,6 +1048,102 @@ function cacheStoreTests (CacheStore) {
     }
 
     await sleep(3500)
+
+    strictEqual(await redis.exists(indexKey), 0)
+    strictEqual(await redis.exists(methodSetKey), 0)
+    strictEqual(await redis.exists(tagIndexKey), 0)
+    strictEqual(await redis.exists(globalTagIndexKey), 0)
+  })
+
+  test('keeps Valkey 9 optimized containers alive for the longest live variant', async (t) => {
+    await cleanValkey()
+
+    const redis = new Redis()
+    t.after(async () => {
+      await redis.quit()
+    })
+
+    if (!await supportsHashFieldExpiration(redis)) {
+      t.skip('HEXPIREAT is not supported by this Redis/Valkey server')
+      return
+    }
+
+    const keyPrefix = `${crypto.randomUUID()}:`
+    const tag = `tag-${crypto.randomUUID()}`
+    const request = {
+      origin: 'http://test-origin-1',
+      path: '/foo?bar=baz',
+      method: 'GET',
+      headers: {
+        accept: 'application/json'
+      }
+    }
+    const baseValue = {
+      statusCode: 200,
+      statusMessage: '',
+      headers: {
+        'cache-tag': tag
+      },
+      cachedAt: Date.now(),
+      staleAt: Date.now() + 1000
+    }
+
+    const store = new CacheStore({
+      keyPrefix,
+      cacheTagsHeader: 'cache-tag',
+      tracking: false,
+      errorCallback: (err) => {
+        fail(err)
+      }
+    })
+
+    t.after(async () => {
+      await store.close()
+    })
+
+    const shortStream = store.createWriteStream(request, {
+      ...baseValue,
+      vary: { accept: 'application/json' },
+      deleteAt: Date.now() + 2500
+    })
+    writeResponse(shortStream, ['short'])
+    await once(shortStream, 'close')
+
+    const longStream = store.createWriteStream(request, {
+      ...baseValue,
+      vary: { accept: 'text/plain' },
+      deleteAt: Date.now() + 6500
+    })
+    writeResponse(longStream, ['long'])
+    await once(longStream, 'close')
+
+    const keys = await getAllKeys()
+    const indexKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:`) && key.endsWith(':index'))
+    const methodSetKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:`) && key.endsWith(':methods'))
+    const tagIndexKey = keys.find(key => key.startsWith(`${keyPrefix}cache:v2:tag:`))
+    const globalTagIndexKey = keys.find(key => key.startsWith('cache:v2:global-tag:'))
+    ok(indexKey)
+    ok(methodSetKey)
+    ok(tagIndexKey)
+    ok(globalTagIndexKey)
+
+    for (const key of [indexKey, methodSetKey, tagIndexKey, globalTagIndexKey]) {
+      const ttl = await redis.ttl(key)
+      ok(ttl > 4)
+      ok(ttl <= 7)
+    }
+
+    await sleep(3500)
+
+    strictEqual(await redis.exists(indexKey), 1)
+    strictEqual(await redis.exists(methodSetKey), 1)
+    strictEqual(await redis.exists(tagIndexKey), 1)
+    strictEqual(await redis.exists(globalTagIndexKey), 1)
+
+    const liveIndexFields = await redis.hkeys(indexKey)
+    ok(liveIndexFields.length > 0)
+
+    await sleep(4000)
 
     strictEqual(await redis.exists(indexKey), 0)
     strictEqual(await redis.exists(methodSetKey), 0)
