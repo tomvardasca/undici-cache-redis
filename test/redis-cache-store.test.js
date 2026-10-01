@@ -12,6 +12,23 @@ const { setTimeout: sleep } = require('node:timers/promises')
 
 cacheStoreTests(RedisCacheStore)
 
+const errorKey = {
+  origin: 'http://test-origin',
+  path: '/',
+  method: 'GET',
+  headers: {}
+}
+
+const errorResponse = {
+  statusCode: 502,
+  statusMessage: 'Bad Gateway',
+  headers: { 'cache-control': 'public, max-age=60' },
+  cacheControlDirectives: { public: true, 'max-age': 60 },
+  cachedAt: Date.now(),
+  staleAt: Date.now() + 60000,
+  deleteAt: Date.now() + 60000
+}
+
 function cacheStoreTests (CacheStore) {
   describe(CacheStore.prototype.constructor.name, () => {
     test('matches interface', async (t) => {
@@ -24,6 +41,22 @@ function cacheStoreTests (CacheStore) {
       equal(typeof store.get, 'function')
       equal(typeof store.createWriteStream, 'function')
       equal(typeof store.delete, 'function')
+    })
+
+    test('does not cache server error responses by default', async (t) => {
+      const store = new CacheStore({ tracking: false })
+      t.after(() => store.close())
+
+      strictEqual(store.createWriteStream(errorKey, errorResponse), undefined)
+    })
+
+    test('can opt into caching server error responses', async (t) => {
+      const store = new CacheStore({ cacheErrorResponses: true, tracking: false })
+      t.after(() => store.close())
+
+      const writeStream = store.createWriteStream(errorKey, errorResponse)
+      ok(writeStream)
+      writeStream.destroy()
     })
 
     test('write stream fails when the write to redis fails', async (t) => {

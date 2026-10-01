@@ -31,6 +31,12 @@ export interface RedisCacheStoreOpts {
    */
   keyPrefix?: string
 
+  /**
+   * Allow explicitly cacheable 5xx responses to be stored.
+   * @default false
+   */
+  cacheErrorResponses?: boolean
+
   clientOpts?: RedisOptions
   
   maxEntrySize?: number
@@ -62,7 +68,7 @@ declare class RedisCacheStore extends EventEmitter {
 
   get(key: CacheKey): Promise<GetResult | undefined>
 
-  createWriteStream(key: CacheKey, value: CachedResponse): Writable
+  createWriteStream(key: CacheKey, value: CachedResponse): Writable | undefined
 
   delete(key: CacheKey): Promise<void>
 

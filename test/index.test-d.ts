@@ -14,6 +14,7 @@ expectAssignable<RedisCacheStoreOpts>({
 
 expectAssignable<RedisCacheStoreOpts>({
     clientOpts: clientOpts,
+    cacheErrorResponses: false,
     maxSize: 0,
     tracking: false
 })
