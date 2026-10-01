@@ -459,6 +459,11 @@ const store = new RedisCacheStore({
 
 Entries written by previous versions are not indexed, so lookups don't find them. Flush the cache when upgrading, or let the old entries expire.
 
+Index keys written by `@tomvardasca/undici-cache-redis` 1.x (`cache:v2:*`) are no longer used. On servers without hash field expiration they never expire, so remove them after upgrading:
+
+```sh
+valkey-cli --scan --pattern '*cache:v2:*' | xargs -r valkey-cli unlink
+```
 
 ## Cache Invalidation Flow
 
